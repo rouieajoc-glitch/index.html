@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#050805">
+<title>coin-term</title>
+<style>
+:root{--bg:#050805;--fg:#33ff66;--dim:#1f9e40;--up:#33ff66;--down:#ff4d4d;--warn:#ffd24d}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0;background:var(--bg);color:var(--fg);
+ font:14px/1.45 ui-monospace,"SF Mono","Cascadia Mono",Menlo,Consolas,monospace}
+body{display:flex;flex-direction:column;padding:env(safe-area-inset-top,0) 0 env(safe-area-inset-bottom,0)}
+#log{flex:1;overflow-y:auto;padding:10px 12px}
+.dim{color:var(--dim)}.up{color:var(--up)}.down{color:var(--down)}.warn{color:var(--warn)}
+pre{margin:0 0 8px;white-space:pre;overflow-x:auto}
+#bar{display:flex;gap:8px;padding:10px 12px;border-top:1px solid var(--dim)}
+#bar span{color:var(--dim)}
+#cmd{flex:1;background:none;border:0;outline:0;color:var(--fg);font:inherit;font-size:16px;caret-color:var(--fg)}
+#cmd:focus-visible{outline:1px solid var(--dim)}
+</style>
+</head>
+<body>
+<div id="log" aria-live="polite"></div>
+<div id="bar"><span>root@coin-term:~$</span><input id="cmd" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" aria-label="command"></div>
+<script>
+const log=document.getElementById('log'),cmd=document.getElementById('cmd');
+let coins=[],lastShown=[],watch=load('ct_watch',[]),alerts=load('ct_alerts',[]);
+function load(k,d){try{return JSON.parse(localStorage.getItem(k))||d}catch(e){return d}}
+function save(k,v){try{localStorage.setItem(k,JSON.stringify(v))}catch(e){}}
+function out(html,cls){const p=document.createElement('pre');if(cls)p.className=cls;p.innerHTML=html;log.appendChild(p);log.scrollTop=log.scrollHeight}
+const esc=s=>String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+function price(n){if(n==null)return'-';return '$'+(n>=1?n.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}):n.toPrecision(3))}
+function big(n){if(n==null)return'-';const u=[[1e12,'T'],[1e9,'B'],[1e6,'M']];for(const[v,s]of u)if(n>=v)return '$'+(n/v).toFixed(2)+s;return '$'+n.toLocaleString()}
+function table(rows){
+ if(!rows.length)return out('no results','warn');
+ lastShown=rows;
+ let h='<span class="dim">'+'#'.padEnd(4)+'COIN'.padEnd(8)+'PRICE'.padStart(13)+'24H'.padStart(9)+'MCAP'.padStart(11)+'</span>\n';
+ for(const c of rows){
+  const ch=c.price_change_percentage_24h,cls=ch>=0?'up':'down';
+  const chs=ch==null?'-':(ch>=0?'+':'')+ch.toFixed(2)+'%';
+  h+=String(c.market_cap_rank||'-').padEnd(4)+esc(c.symbol.toUpperCase().slice(0,7)).padEnd(8)+price(c.current_price).padStart(13)+
+   '<span class="'+cls+'">'+chs.padStart(9)+'</span>'+big(c.market_cap).padStart(11)+'\n';
+ }
+ out(h);
+}
+async function fetchCoins(quiet){
+ try{
+  const r=await fetch('https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=100&page=1&price_change_percentage=24h');
+  if(!r.ok)throw new Error('HTTP '+r.status);
+  coins=await r.json();
+  if(!quiet)out('[ok] '+coins.length+' coins loaded','dim');
+  checkAlerts();
+  return true;
+ }catch(e){out('[error] could not load prices ('+esc(e.message)+'). Check your connection, then type: refresh','down');return false}
+}
+function checkAlerts(){
+ alerts=alerts.filter(a=>{
+  const c=coins.find(x=>x.symbol===a.sym);if(!c)return true;
+  const hit=a.dir==='above'?c.current_price>=a.price:c.current_price<=a.price;
+  if(hit){out('[ALERT] '+a.sym.toUpperCase()+' is '+a.dir+' '+price(a.price)+' (now '+price(c.current_price)+')','warn');
+   try{if(navigator.vibrate)navigator.vibrate([200,100,200])}catch(e){}}
+  return !hit;
+ });save('ct_alerts',alerts);
+}
+const find=s=>coins.find(c=>c.symbol===s.toLowerCase()||c.id===s.toLowerCase());
+const help=`commands:
+  top [n]          top coins by market cap (default 20)
+  search <text>    find a coin by name or symbol
+  watch a b c      save a watchlist  |  watch  show it
+  unwatch <sym>    remove from watchlist
+  gainers/losers   best/worst 24h movers
+  alert <sym> <$>  notify when price is crossed
+  alerts           list active alerts
+  refresh          reload prices
+  clear            clear screen`;
+async function run(line){
+ out('<span class="dim">$</span> '+esc(line));
+ const [c,...a]=line.trim().split(/\s+/);
+ if(!c)return;
+ const cmdName=c.toLowerCase();
+ if(!coins.length&&cmdName!=='help'&&cmdName!=='clear'&&!(await fetchCoins(true)))return;
+ switch(cmdName){
+  case'help':out(help);break;
+  case'clear':log.innerHTML='';break;
+  case'refresh':await fetchCoins();table(lastShown.length?lastShown.map(x=>coins.find(c=>c.id===x.id)).filter(Boolean):coins.slice(0,20));break;
+  case'top':table(coins.slice(0,Math.min(100,parseInt(a[0])||20)));break;
+  case'search':{const q=(a.join(' ')||'').toLowerCase();table(coins.filter(x=>x.name.toLowerCase().includes(q)||x.symbol.includes(q)).slice(0,15));break}
+  case'gainers':table([...coins].sort((x,y)=>y.price_change_percentage_24h-x.price_change_percentage_24h).slice(0,10));break;
+  case'losers':table([...coins].sort((x,y)=>x.price_change_percentage_24h-y.price_change_percentage_24h).slice(0,10));break;
+  case'watch':
+   if(a.length){watch=[...new Set(a.map(s=>s.toLowerCase()))];save('ct_watch',watch);out('watchlist saved: '+esc(watch.join(', ')),'dim')}
+   if(!watch.length)out('watchlist is empty. Try: watch btc eth sol','warn');
+   else table(watch.map(find).filter(Boolean));break;
+  case'unwatch':watch=watch.filter(s=>s!==(a[0]||'').toLowerCase());save('ct_watch',watch);out('removed. watchlist: '+esc(watch.join(', ')||'empty'),'dim');break;
+  case'alert':{
+   const co=find(a[0]||''),p=parseFloat((a[1]||'').replace(/[$,]/g,''));
+   if(!co||!(p>0)){out('usage: alert btc 100000','warn');break}
+   const dir=p>=co.current_price?'above':'below';
+   alerts.push({sym:co.symbol,price:p,dir});save('ct_alerts',alerts);
+   out('alert set: '+co.symbol.toUpperCase()+' '+dir+' '+price(p)+' (checked every 60s while this page is open)','dim');break}
+  case'alerts':out(alerts.length?alerts.map(x=>x.sym.toUpperCase()+' '+x.dir+' '+price(x.price)).join('\n'):'no active alerts','dim');break;
+  default:out('command not found: '+esc(cmdName)+'. Type help','down');
+ }
+}
+cmd.addEventListener('keydown',e=>{if(e.key==='Enter'){const v=cmd.value;cmd.value='';run(v)}});
+document.getElementById('log').addEventListener('click',()=>cmd.focus());
+async function boot(){
+ const lines=['[ 0.001 ] initializing coin-term v1.0','[ 0.114 ] mounting /dev/market ... ok','[ 0.302 ] connecting to price feed ...'];
+ const reduce=matchMedia('(prefers-reduced-motion: reduce)').matches;
+ for(const l of lines){out(l,'dim');if(!reduce)await new Promise(r=>setTimeout(r,350))}
+ await fetchCoins();
+ out('type <span class="warn">help</span> for commands\n');
+ if(coins.length)table(coins.slice(0,20));
+ setInterval(()=>fetchCoins(true),60000);
+}
+boot();
+</script>
+</body>
+</html>
